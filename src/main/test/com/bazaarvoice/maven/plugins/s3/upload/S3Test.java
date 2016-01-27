@@ -31,7 +31,6 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 
-@Ignore
 public class S3Test extends Assert {
 
     private AmazonS3Client client;

@@ -10,6 +10,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import javax.activation.MimetypesFileTypeMap;
+
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Mojo;
@@ -22,6 +24,7 @@ import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.internal.StaticCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.Headers;
 import com.amazonaws.services.s3.model.CannedAccessControlList;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
@@ -76,9 +79,14 @@ public class S3UploadMojo extends AbstractMojo {
     private LinkedList<Metadata> metadatas;
 
     private int indice = 0;
+    
+    private MimetypesFileTypeMap mimeTypes;
 
     @Override
     public void execute() throws MojoExecutionException {
+        indice = 0;
+        mimeTypes = new MimetypesFileTypeMap(getClass().getResourceAsStream("/META-INF/mime.types"));
+        
         if (skip) {
             getLog().info("Skipping S3UPload");
             return;
@@ -144,7 +152,7 @@ public class S3UploadMojo extends AbstractMojo {
                     try {
                         File file = new File(filePath);
                         is = new FileInputStream(file);
-                        key = getFileKey(filePath, root.getAbsolutePath(), source);
+                        key = getFileKey(filePath, root.getAbsolutePath(), source, destination);
                         ObjectMetadata om = getObjectMetaData(key, file);
 
                         PutObjectRequest por = new PutObjectRequest(bucketName, key, is, om);
@@ -164,7 +172,7 @@ public class S3UploadMojo extends AbstractMojo {
                             throw new RuntimeException(e);
                         }
                     }
-                    getLog().info(String.format("%s de %s arquivos, %s% concluido. Arquivo %s", ++indice, filePaths.size(),
+                    getLog().info(String.format("%s de %s arquivos, %s porcento concluido. Arquivo %s", ++indice, filePaths.size(),
                         (indice * 100 / filePaths.size()), key));
                 }
 
@@ -185,11 +193,16 @@ public class S3UploadMojo extends AbstractMojo {
             }
         }
         om.setHeader("Content-Length", file.length());
+        
+        if (!om.getRawMetadata().containsKey(Headers.CONTENT_TYPE)){
+            om.setHeader(Headers.CONTENT_TYPE, mimeTypes.getContentType(file));
+        }
+        
         return om;
     }
 
-    protected String getFileKey(String filePath, String rootFilePath, String source) {
-        return filePath.replace(rootFilePath.replace(source, ""), "").replace("\\", "/");
+    protected String getFileKey(String filePath, String rootFilePath, String source, String destination) {
+        return destination + filePath.replace(rootFilePath.replace(source, ""), "").replace("\\", "/");
     }
 
     private List<String> listFiles(File root, List<String> paths) throws Exception {
