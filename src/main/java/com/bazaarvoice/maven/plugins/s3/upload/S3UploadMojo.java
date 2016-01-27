@@ -1,8 +1,14 @@
 package com.bazaarvoice.maven.plugins.s3.upload;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -16,59 +22,60 @@ import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.internal.StaticCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.AccessControlList;
-import com.amazonaws.services.s3.model.S3Object;
-import com.amazonaws.services.s3.transfer.Transfer;
-import com.amazonaws.services.s3.transfer.TransferManager;
+import com.amazonaws.services.s3.model.CannedAccessControlList;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
 
 @Mojo(name = "s3-upload")
 public class S3UploadMojo extends AbstractMojo {
     /** Access key for S3. */
     @Parameter(property = "s3-upload.accessKey")
-    private String                 accessKey;
+    private String accessKey;
 
     /** Secret key for S3. */
     @Parameter(property = "s3-upload.secretKey")
-    private String                 secretKey;
+    private String secretKey;
 
     /**
      * Execute all steps up except the upload to the S3. This can be set to true
      * to perform a "dryRun" execution.
      */
     @Parameter(property = "s3-upload.doNotUpload", defaultValue = "false")
-    private boolean                doNotUpload;
+    private boolean doNotUpload;
 
     /**
      * Skips execution
      */
     @Parameter(property = "s3-upload.skip", defaultValue = "false")
-    private boolean                skip;
+    private boolean skip;
 
     /** The file/folder to upload. */
     @Parameter(property = "s3-upload.source", required = true)
-    private String                 source;
+    private String source;
 
     /** The bucket to upload into. */
     @Parameter(property = "s3-upload.bucketName", required = true)
-    private String                 bucketName;
+    private String bucketName;
 
     /** The file/folder (in the bucket) to create. */
     @Parameter(property = "s3-upload.destination", required = true)
-    private String                 destination;
+    private String destination;
 
     /** Force override of endpoint for S3 regions such as EU. */
     @Parameter(property = "s3-upload.endpoint")
-    private String                 endpoint;
+    private String endpoint;
 
     /** In the case of a directory upload, recursively upload the contents. */
     @Parameter(property = "s3-upload.recursive", defaultValue = "false")
-    private boolean                recursive;
+    private boolean recursive;
 
     @Parameter(property = "s3-upload.permissions")
     private LinkedList<Permission> permissions;
 
     @Parameter(property = "s3-upload.metadatas")
-    private LinkedList<Metadata>   metadatas;
+    private LinkedList<Metadata> metadatas;
+
+    private int indice = 0;
 
     @Override
     public void execute() throws MojoExecutionException {
@@ -96,9 +103,10 @@ public class S3UploadMojo extends AbstractMojo {
             return;
         }
 
-        boolean success = upload(s3, sourceFile);
-        if (!success) {
-            throw new MojoExecutionException("Unable to upload file to S3.");
+        try {
+            upload(s3, sourceFile);
+        } catch (Exception e) {
+            throw new MojoExecutionException("Unable to upload file to S3", e);
         }
 
         getLog().info(String.format("File %s uploaded to s3://%s/%s", sourceFile, bucketName, destination));
@@ -116,87 +124,83 @@ public class S3UploadMojo extends AbstractMojo {
         return new AmazonS3Client(provider);
     }
 
-    private boolean upload(AmazonS3 s3, File sourceFile) throws MojoExecutionException {
-        TransferManager mgr = new TransferManager(s3);
+    private void upload(final AmazonS3 s3, final File root) throws MojoExecutionException, Exception {
 
-        Transfer transfer;
-        if (sourceFile.isFile()) {
-            transfer = mgr.upload(bucketName, destination, sourceFile);
-        } else if (sourceFile.isDirectory()) {
-            transfer = mgr.uploadDirectory(bucketName, destination, sourceFile, recursive);
-        } else {
-            throw new MojoExecutionException("File is neither a regular file nor a directory " + sourceFile);
-        }
-        try {
-            getLog().debug("Transferring " + transfer.getProgress().getTotalBytesToTransfer() + " bytes...");
-            transfer.waitForCompletion();
-            getLog().info("Transferred " + transfer.getProgress().getBytesTransfered() + " bytes.");
-            try {
-                if (metadatas != null && metadatas.size() > 0) {
-                    updateMetadatas(s3, sourceFile, sourceFile.getCanonicalPath(), destination);
-                }
-                if (permissions != null && permissions.size() > 0) {
-                    updatePermissions(s3, sourceFile, sourceFile.getCanonicalPath(), destination);
-                }
-            } catch (IOException e) {
-                throw new MojoExecutionException("Error getting file canonicalPath when updating permissions/metadatas", e);
-            }
-        } catch (InterruptedException e) {
-            return false;
-        }
-
-        return true;
-    }
-
-    private void updatePermissions(AmazonS3 s3, File sourceFile, String localPrefix, String keyPrefix) throws MojoExecutionException {
-        try {
-            if (sourceFile.isFile()) {
-                updatePermissions(s3, sourceFile.getCanonicalPath().replace(localPrefix, keyPrefix));
-            } else {
-                for (File f : sourceFile.listFiles()) {
-                    updatePermissions(s3, f, f.getCanonicalPath(), keyPrefix.replaceAll("([^/])/*$", "$1/") + f.getName());
-                }
-            }
-        } catch (IOException ioe) {
-            throw new MojoExecutionException("Error getting file canonicalPath when updating permissions", ioe);
-        }
-    }
-
-    private void updatePermissions(AmazonS3 s3, String key) {
-        AccessControlList acl = s3.getObjectAcl(bucketName, key);
-        for (Permission p : permissions) {
-            acl.grantPermission(p.getAsGrantee(), p.getPermission());
-        }
-        s3.setObjectAcl(bucketName, key, acl);
-        if (getLog().isInfoEnabled()) {
-            getLog().info("Updating permissions for '" + key + "' in bucket '" + bucketName);
-        }
-    }
-
-    private void updateMetadatas(AmazonS3 s3, File sourceFile, String localPrefix, String keyPrefix) throws MojoExecutionException {
-        try {
-            if (sourceFile.isFile()) {
-                updateMetadatas(s3, sourceFile.getCanonicalPath().replace(localPrefix, keyPrefix));
-            } else {
-                for (File f : sourceFile.listFiles()) {
-                    updateMetadatas(s3, f, f.getCanonicalPath(), keyPrefix.replaceAll("([^/])/*$", "$1/") + f.getName());
-                }
-            }
-        } catch (IOException ioe) {
-            throw new MojoExecutionException("Error getting file canonicalPath when updating metadatas", ioe);
-        }
-    }
-
-    private void updateMetadatas(AmazonS3 s3, String key) throws MojoExecutionException {
-        S3Object s3o = s3.getObject(bucketName, key);
-        for (Metadata m : metadatas) {
-            if (m.shouldSetMetadata(key)) {
-                s3o.getObjectMetadata().setHeader(m.getKey(), m.getValue());
-            }
-        }
+        final List<String> filePaths = listFiles(root, new LinkedList<String>());
         if (getLog().isDebugEnabled()) {
-            getLog().debug("setting metadata:" + s3o.getObjectMetadata().getRawMetadata() + " for object " + bucketName + ":" + key);
+            getLog().debug("Files to upload:" + filePaths.toString().replace(" ", "\n"));
         }
-        s3.putObject(bucketName, key, s3o.getObjectContent(), s3o.getObjectMetadata());
+
+        ExecutorService executor = Executors.newFixedThreadPool(20);
+
+        for (final String filePath : filePaths) {
+
+            Runnable runnable = new Runnable() {
+
+                @Override
+                public void run() {
+                    InputStream is = null;
+                    String key = null;
+                    try {
+                        File file = new File(filePath);
+                        is = new FileInputStream(file);
+                        key = getFileKey(filePath, root.getAbsolutePath(), source);
+                        ObjectMetadata om = getObjectMetaData(key, file);
+
+                        PutObjectRequest por = new PutObjectRequest(bucketName, key, is, om);
+                        por.setCannedAcl(CannedAccessControlList.PublicRead);
+
+                        // client.putObject(bucket, key, is, om);
+                        s3.putObject(por);
+
+                    } catch (Exception e) {
+                        getLog().error(e);
+                        throw new RuntimeException(e);
+                    } finally {
+                        try {
+                            is.close();
+                        } catch (IOException e) {
+                            getLog().error(e);
+                            throw new RuntimeException(e);
+                        }
+                    }
+                    getLog().info(String.format("%s de %s arquivos, %s% concluido. Arquivo %s", ++indice, filePaths.size(),
+                        (indice * 100 / filePaths.size()), key));
+                }
+
+            };
+            executor.execute(runnable);
+
+        }
+        executor.shutdown();
+        executor.awaitTermination(30, TimeUnit.MINUTES);
+
     }
+
+    protected ObjectMetadata getObjectMetaData(String key, File file) {
+        ObjectMetadata om = new ObjectMetadata();
+        for (Metadata metadata : metadatas) {
+            if (metadata.shouldSetMetadata(key)) {
+                om.setHeader(metadata.getKey(), metadata.getValue());
+            }
+        }
+        om.setHeader("Content-Length", file.length());
+        return om;
+    }
+
+    protected String getFileKey(String filePath, String rootFilePath, String source) {
+        return filePath.replace(rootFilePath.replace(source, ""), "").replace("\\", "/");
+    }
+
+    private List<String> listFiles(File root, List<String> paths) throws Exception {
+        if (root.isDirectory()) {
+            for (File innerFile : root.listFiles()) {
+                listFiles(innerFile, paths);
+            }
+        } else {
+            paths.add(root.getAbsolutePath());
+        }
+        return paths;
+    }
+
 }
