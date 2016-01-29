@@ -201,8 +201,8 @@ public class S3UploadMojo extends AbstractMojo {
         return om;
     }
 
-    protected String getFileKey(String filePath, String rootFilePath, String source, String destination) {
-        return destination + filePath.replace(rootFilePath.replace(source, ""), "").replace("\\", "/");
+    protected static String getFileKey(String filePath, String rootFilePath, String source, String destination) {
+        return (destination + filePath.replace(rootFilePath, "")).replace("\\", "/");
     }
 
     private List<String> listFiles(File root, List<String> paths) throws Exception {
